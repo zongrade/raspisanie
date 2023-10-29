@@ -144,7 +144,8 @@ func updateTime(clock *widget.Label) {
 func main() {
 	//saveJson(getJson())
 	//osnova()
-	netTest()
+	//netTest()
+	try()
 }
 
 type s int
@@ -196,12 +197,241 @@ func getDa(w fyne.Window, dat string) (Day, DayNumber uint8) {
 	return Day, DayNumber
 }
 
+func isStorageExist(a *fyne.App, w *fyne.Window) (isExist bool, dataDir string) {
+	dataDir = (*a).Storage().RootURI().Path()
+	if dataDir == "" {
+		info := dialog.NewInformation("Storage error", "hmm, no storage", *w)
+		info.Show()
+		go func() {
+			<-time.After(1 * time.Second)
+			info.Hide()
+		}()
+		return false, ""
+	}
+	return true, dataDir
+}
+
+func isDataJsonExist(a *fyne.App, w *fyne.Window) (bool, string, error) {
+	if ok, dataDir := isStorageExist(a, w); ok {
+		filePath := filepath.Join(dataDir, "data.json")
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			return false, filePath, nil
+		} else if err != nil {
+			return false, filePath, err
+		} else {
+			return true, filePath, nil
+		}
+	}
+	return false, "", nil
+}
+
+func deleteJson(jsonPath string) error {
+	err := os.Remove(jsonPath)
+	return err
+}
+
+func decodeJsonData(fi *os.File, data *DaAr, w *fyne.Window) error {
+	dec := json.NewDecoder(fi)
+	if err := dec.Decode(&data); err != nil {
+		info := dialog.NewInformation("Error decoding json", "while decoding data.json occured error", *w)
+		info.Show()
+		go func() {
+			<-time.After(1 * time.Second)
+			info.Hide()
+		}()
+		return err
+	} else {
+		return nil
+	}
+}
+
+func openData(w *fyne.Window, jsonPath string, data *DaAr) error {
+	fi, err := os.Open(jsonPath)
+	if err != nil {
+		info := dialog.NewInformation("Error while open json", fmt.Sprintf("Open json occured: %v", err), *w)
+		info.Show()
+		go func() {
+			<-time.After(1 * time.Second)
+			info.Hide()
+		}()
+		return err
+	}
+	defer fi.Close()
+	err = decodeJsonData(fi, data, w)
+	if err != nil {
+		if deleteJson(jsonPath) != nil {
+			info := dialog.NewInformation("Error delete json", fmt.Sprintf("Delete json occured: %v", err), *w)
+			info.Show()
+			go func() {
+				<-time.After(1 * time.Second)
+				info.Hide()
+			}()
+			return err
+		}
+	}
+	return err
+}
+
+func createClassNum(numb string) string {
+	if len(numb) > 10 {
+		return "no class number"
+	}
+	return numb
+}
+
+func createListOfPars(w *fyne.Window, value string, data *DaAr, li *fyne.Container) *fyne.Container {
+	Day, DayNumber := getDa(*w, value)
+	dA := data.getRasp(Day+1, DayNumber)
+	for _, it := range dA {
+		card := widget.NewCard(it.Ti.Time, it.Rm.Name, container.NewVBox(
+			widget.NewLabel(it.Cl.Name),
+			widget.NewLabel(it.Cl.Teacher),
+			widget.NewLabel(it.getStart()),
+			widget.NewLabel(it.getEnd()),
+		))
+		line := canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113})
+		li.Add(container.NewVBox(card, line))
+	}
+	return li
+}
+
+// Парралельное использование
+func setLoading(ok *widget.Label, c <-chan struct{}) {
+	loading := []string{"Получение данных\\...", "Получение данных.|..", "Получение данных../."}
+	var num s
+	for {
+		select {
+		case <-c:
+			num.reset()
+			ok.SetText("Данные получены")
+			return
+		default:
+			ok.SetText(loading[num])
+			num.next()
+
+			time.Sleep(1 * time.Millisecond * 150)
+		}
+	}
+}
+
+// Парралельное использование
+func setParsing(ok *widget.Label, c <-chan struct{}) {
+	parsing := []string{"Парсинг\\...", "Парсинг.|..", "Парсинг../."}
+	var num s
+	for {
+		select {
+		case <-c:
+			ok.SetText("Данные распаршены")
+			return
+		default:
+			ok.SetText(parsing[num])
+			(&num).next()
+
+			time.Sleep(1 * time.Millisecond * 150)
+		}
+	}
+}
+
+func parsingData(ch chan<- struct{}, bArr []byte, data *DaAr) error {
+	if err := json.Unmarshal(bArr, &data); err != nil {
+		return fmt.Errorf("Ошибка при распарсивании JSON:%v", err)
+	}
+	ch <- struct{}{}
+	return nil
+}
+
+func createAndSaveData(bArr []byte, jsonPath string) error {
+	file, err := os.Create(jsonPath)
+	if err != nil {
+		return fmt.Errorf("ошибка при создании json:%v", err)
+	}
+	defer file.Close()
+	_, err = file.Write(bArr)
+	if err != nil {
+		return fmt.Errorf("ошибка при записи в json:%v", err)
+	}
+	return nil
+}
+
+func initData(a *fyne.App, w *fyne.Window, content *fyne.Container, textState *widget.Label, data *DaAr, value string, li *fyne.Container) {
+	if ext, jsonPath, err := isDataJsonExist(a, w); err != nil {
+		info := dialog.NewInformation("Error data.json", "error while get data.json", *w)
+		go func() {
+			<-time.After(1 * time.Second)
+			info.Hide()
+		}()
+	} else if ext {
+		if openData(w, jsonPath, data) == nil {
+			li = createListOfPars(w, value, data, li)
+			content.Add(li)
+			(*w).Content().Refresh()
+		}
+	} else {
+		ch := make(chan struct{})
+		go setLoading(textState, ch)
+		bArr, err := getJson(ch)
+		if err != nil {
+			info := dialog.NewInformation("Error while send net request", err.Error(), *w)
+			go func() {
+				<-time.After(1 * time.Second)
+				info.Hide()
+			}()
+		} else {
+			go setParsing(textState, ch)
+			parsingData(ch, bArr, data)
+			if createAndSaveData(bArr, jsonPath) != nil {
+				info := dialog.NewInformation("Error while save and write to json", err.Error(), *w)
+				go func() {
+					<-time.After(1 * time.Second)
+					info.Hide()
+				}()
+			} else {
+				initData(a, w, content, textState, data, value, li)
+			}
+		}
+		//TODO: не существует json -> запросить net  и создать
+	}
+}
+
+func try() {
+	var data DaAr
+	a := app.NewWithID("com.raspisanie.app")
+	a.Settings().SetTheme(theme.DarkTheme())
+	w := a.NewWindow("internet")
+	li := container.NewVBox()
+	w.Resize(fyne.Size{Width: 500})
+	var content *fyne.Container
+	var menu *fyne.Container
+	currValue := "Сегодня"
+	ok := widget.NewLabel("none data")
+	menu = container.NewHBox(
+		ok,
+		widget.NewRadioGroup([]string{"Сегодня", "Завтра"}, func(value string) {
+			if currValue != value {
+				fmt.Println("currValue:", currValue)
+				fmt.Println("value:", value)
+				currValue = value
+				li.RemoveAll()
+				content.Remove(li)
+				initData(&a, &w, content, ok, &data, value, li)
+			}
+		}),
+	)
+	content = container.NewVBox(
+		menu,
+	)
+	initData(&a, &w, content, ok, &data, "Сегодня", li)
+	scr := container.NewVScroll(content)
+	w.SetContent(scr)
+	w.ShowAndRun()
+}
+
 func netTest() {
 	var data DaAr
 	a := app.NewWithID("com.raspisanie.app")
 	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("internet")
-	//w.Resize(fyne.Size{Height: 600, Width: 600})
+	w.Resize(fyne.Size{Width: 600})
 	var content *fyne.Container
 	ok := widget.NewLabel("none data")
 	Day, DayNumber := getDa(w, "Сегодня")
@@ -240,7 +470,7 @@ func netTest() {
 				}
 			}(ch)
 
-			bArr := getJson(ch)
+			bArr, _ := getJson(ch)
 			go func(c <-chan struct{}) {
 				var num s
 				for {
@@ -300,9 +530,7 @@ func netTest() {
 				dA := data.getRasp(Day+1, DayNumber)
 				li := container.NewVBox()
 				for _, it := range dA {
-					card := widget.NewCard("Para", "Class", container.NewVBox(
-						widget.NewLabel(it.Ti.Time),
-						widget.NewLabel(it.Rm.Name),
+					card := widget.NewCard(it.Ti.Time, it.Rm.Name, container.NewVBox(
 						widget.NewLabel(it.Cl.Name),
 						widget.NewLabel(it.Cl.Teacher),
 						widget.NewLabel(it.getStart()),
@@ -401,7 +629,7 @@ func osnova() {
 	w.ShowAndRun()
 }
 
-func getJson(ch chan<- struct{}) []byte {
+func getJson(ch chan<- struct{}) ([]byte, error) {
 	client := &http.Client{}
 
 	cookies := []*http.Cookie{
@@ -431,8 +659,7 @@ func getJson(ch chan<- struct{}) []byte {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		fmt.Println("Ошибка при создании запроса:", err)
-		return nil
+		return nil, fmt.Errorf("Ошибка при создании запроса:%v", err)
 	}
 
 	for _, cookie := range cookies {
@@ -441,34 +668,16 @@ func getJson(ch chan<- struct{}) []byte {
 
 	response, err := client.Do(req)
 	if err != nil {
-		fmt.Println("Ошибка при выполнении запроса:", err)
-		return nil
+		return nil, fmt.Errorf("Ошибка при выполнении запроса:%v", err)
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		fmt.Println("Ошибка при чтении ответа:", err)
-		return nil
+		return nil, fmt.Errorf("Ошибка при чтении ответа:%v", err)
 	}
 	ch <- struct{}{}
-	return body
-
-	//fmt.Printf("Body: %v\n", body)
-
-	// Создание переменной для хранения распарсенных данных
-	//var data DaAr
-
-	// Распарсиваем JSON-данные
-	//if err := json.Unmarshal(body, &data); err != nil {
-	//	fmt.Println("Ошибка при распарсивании JSON:", err)
-	//	return nil
-	//}
-
-	//// Теперь у вас есть доступ к данным в переменной data
-	//fmt.Printf("Data: %#v", data)
-	//// Выводите другие поля, если они есть в вашем JSON
-	//return nil
+	return body, nil
 }
 
 func check(e error) {
