@@ -2,14 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/color"
 	"io"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -17,7 +22,6 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -96,13 +100,189 @@ func (d *DaAr) getRasp(day, dayNumber uint8) []*Da {
 	return arrDat
 }
 
+// Используется для русского отображения
+type RuWeekD int
+
+const (
+	RuMonday    RuWeekD = iota //"Понедельник"
+	RuTuesday                  //= "Вторник"
+	RuWednesday                //= "Среда"
+	RuThursday                 //= "Четверг"
+	RuFriday                   //= "Пятница"
+	RuSaturday                 //= "Суббота"
+	RuSunday                   //= "Воскресенье"
+)
+
+func (rDay RuWeekD) String() string {
+	switch rDay {
+	case RuMonday:
+		return "Понедельник"
+	case RuTuesday:
+		return "Вторник"
+	case RuWednesday:
+		return "Среда"
+	case RuThursday:
+		return "Четверг"
+	case RuFriday:
+		return "Пятница"
+	case RuSaturday:
+		return "Суббота"
+	case RuSunday:
+		return "Воскресенье"
+	default:
+		return "Понедельник"
+	}
+}
+
+func stringToRuWeekD(day string) RuWeekD {
+	switch day {
+	case "Понедельник":
+		return RuMonday
+	case "Вторник":
+		return RuTuesday
+	case "Среда":
+		return RuWednesday
+	case "Четверг":
+		return RuThursday
+	case "Пятница":
+		return RuFriday
+	case "Суббота":
+		return RuSaturday
+	case "Воскресенье":
+		return RuSunday
+	default:
+		return RuMonday
+	}
+}
+
+func RuWeekDToList() []RuWeekD {
+	return []RuWeekD{RuMonday, RuThursday, RuWednesday,
+		RuThursday, RuFriday, RuSaturday, RuSunday}
+}
+
+func (rDay RuWeekD) ToWeekD() WeekD {
+	switch rDay {
+	case RuMonday:
+		return Monday
+	case RuTuesday:
+		return Tuesday
+	case RuWednesday:
+		return Wednesday
+	case RuThursday:
+		return Thursday
+	case RuFriday:
+		return Friday
+	case RuSaturday:
+		return Saturday
+	case RuSunday:
+		return Sunday
+	default:
+		return Monday
+	}
+}
+
+func isEqualWeekD(EnDay WeekD, RuDay RuWeekD) bool {
+	return RuDay.ToWeekD() == EnDay
+}
+
+// Используется для английского отображения и работы с датой
 type WeekD int
+
+const (
+	Monday WeekD = iota
+	Tuesday
+	Wednesday
+	Thursday
+	Friday
+	Saturday
+	Sunday
+)
+
+func ArrayWeekD() []WeekD {
+	return []WeekD{
+		Monday,
+		Tuesday,
+		Wednesday,
+		Thursday,
+		Friday,
+		Saturday,
+		Sunday,
+	}
+}
+
+func ArrayWeekDString(lang string) (slice []string) {
+	switch lang {
+	case "ru":
+		slice = []string{
+			Monday.RuString(),
+			Tuesday.RuString(),
+			Wednesday.RuString(),
+			Thursday.RuString(),
+			Friday.RuString(),
+			Saturday.RuString(),
+			Sunday.RuString(),
+		}
+	default:
+		slice = []string{
+			Monday.String(),
+			Tuesday.String(),
+			Wednesday.String(),
+			Thursday.String(),
+			Friday.String(),
+			Saturday.String(),
+			Sunday.String(),
+		}
+	}
+	return
+}
 
 func toWeekD(day time.Weekday) WeekD {
 	if day == 0 {
 		return Sunday
 	}
 	return WeekD(day - 1)
+}
+
+func stringToWeekd(day string) WeekD {
+	switch day {
+	case "Monday":
+		return Monday
+	case "Tuesday":
+		return Tuesday
+	case "Wednesday":
+		return Wednesday
+	case "Thursday":
+		return Thursday
+	case "Friday":
+		return Friday
+	case "Saturday":
+		return Saturday
+	case "Sunday":
+		return Sunday
+	default:
+		return Monday
+	}
+}
+
+func (day WeekD) RuString() string {
+	switch day {
+	case Monday:
+		return "Понедельник"
+	case Tuesday:
+		return "Вторник"
+	case Wednesday:
+		return "Среда"
+	case Thursday:
+		return "Четверг"
+	case Friday:
+		return "Пятница"
+	case Saturday:
+		return "Суббота"
+	case Sunday:
+		return "Воскресенье"
+	default:
+		return "Понедельник"
+	}
 }
 
 func (day WeekD) String() string {
@@ -122,29 +302,37 @@ func (day WeekD) String() string {
 	case Sunday:
 		return "Sunday"
 	default:
-		return ""
+		return "Monday"
 	}
 }
 
-const (
-	Monday WeekD = iota
-	Tuesday
-	Wednesday
-	Thursday
-	Friday
-	Saturday
-	Sunday
-)
-
-func updateTime(clock *widget.Label) {
-	formatted := time.Now().Format("Time: 03:04:05")
-	clock.SetText(formatted)
+func smth(startDay WeekD, endDay WeekD) (time.Time, time.Time) {
+	now := time.Now()
+	stTime := time.Date(now.Year(), now.Month(), now.Day(), 1, 0, 0, 0, time.UTC)
+	stTime = time.Date(now.Year(), now.Month(), toWeekD(stTime.Weekday()).diffBetwenDays(startDay)+stTime.Day(), 1, 0, 0, 0, time.UTC)
+	enTime := stTime.Add(time.Duration(startDay.diffBetwenDays(endDay)) * 24 * time.Hour)
+	return stTime, enTime
 }
 
+// func (startDay WeekD) diffBetwenDays(endDay WeekD) (int, time.Time) {
+func (startDay WeekD) diffBetwenDays(endDay WeekD) int {
+	diff := int(endDay - startDay)
+	if startDay == Sunday && endDay == Sunday {
+		diff = int(endDay + 1)
+	}
+	return diff
+	//TODO: написать функцию высчитывающую дату endDay
+	//now:=time.Now()
+	//stTime :=  time.Date(2023,now.Month(),now.Day(),1,0,0,0,time.UTC())
+	//return diff,obj.startTime.Add(24 * time.Duration(diff) * time.Hour).Weekday())
+}
+
+// TODO: функция использует stringToWeekd
+//func (we WeekD) getRaspByDay(w *fyne.Window) *Da {
+//	getDa(w, we.String())
+//}
+
 func main() {
-	//saveJson(getJson())
-	//osnova()
-	//netTest()
 	try()
 }
 
@@ -170,11 +358,16 @@ func (num s) String() string {
 	return strconv.Itoa(num.toInt())
 }
 
-func getDa(w fyne.Window, dat string) (Day, DayNumber uint8) {
+func getDa(w *fyne.Window, dat string) (Day, DayNumber uint8) {
 	specificDate := time.Date(2023, time.October, 23, 1, 0, 0, 0, time.UTC)
 	loc, err := time.LoadLocation("Europe/Moscow")
 	if err != nil {
-		dialog.ShowError(fmt.Errorf("error load Moscow UTC Time"), w)
+		info := dialog.NewInformation("Error load Time", fmt.Sprintf("error load Moscow UTC Time occured: %v", err), *w)
+		info.Show()
+		go func() {
+			<-time.After(1 * time.Second)
+			info.Hide()
+		}()
 	} else {
 		specificDate = specificDate.In(loc)
 	}
@@ -182,7 +375,17 @@ func getDa(w fyne.Window, dat string) (Day, DayNumber uint8) {
 	currentData := time.Now()
 	if dat == "Завтра" {
 		currentData = currentData.Add(time.Hour * 24)
+	} else if dat == Monday.String() {
+		//buff := time.Now().Weekday().String()
+		//currentData = toWeekD(buff).String()
+	} else if dat == Tuesday.String() {
+	} else if dat == Wednesday.String() {
+	} else if dat == Thursday.String() {
+	} else if dat == Friday.String() {
+	} else if dat == Saturday.String() {
+	} else if dat == Sunday.String() {
 	}
+	//TODO: можно принять в dat дни недели и в else это обработать
 	//currentData := time.Now()
 	//currentData := time.Date(2023, time.October, 23, 1, 0, 0, 0, time.UTC)
 	diff := currentData.Sub(specificDate).Hours()
@@ -195,6 +398,14 @@ func getDa(w fyne.Window, dat string) (Day, DayNumber uint8) {
 	currentDay := toWeekD(currentData.Weekday())
 	fmt.Println(currentDay)
 	return Day, DayNumber
+}
+
+func isStorageExist2(a *fyne.App) (isExist bool, dataDir string) {
+	dataDir = (*a).Storage().RootURI().Path()
+	if dataDir == "" {
+		return false, ""
+	}
+	return true, dataDir
 }
 
 func isStorageExist(a *fyne.App, w *fyne.Window) (isExist bool, dataDir string) {
@@ -211,14 +422,32 @@ func isStorageExist(a *fyne.App, w *fyne.Window) (isExist bool, dataDir string) 
 	return true, dataDir
 }
 
-func isDataJsonExist(a *fyne.App, w *fyne.Window) (bool, string, error) {
-	if ok, dataDir := isStorageExist(a, w); ok {
+// Существует ли data.json
+// возвращает да/нет, путь до data, ошибку
+func isDataJsonExist2(a *fyne.App) (bool, string, error) {
+	if ok, dataDir := isStorageExist2(a); ok {
 		filePath := filepath.Join(dataDir, "data.json")
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			return false, filePath, nil
 		} else if err != nil {
+			return false, filePath, errors.New("error while get data.json")
+		} else {
+			return true, filePath, nil
+		}
+	}
+	return false, "", nil
+}
+
+func isDataJsonExist(a *fyne.App, w *fyne.Window) (bool, string, error) {
+	if ok, dataDir := isStorageExist(a, w); ok {
+		filePath := filepath.Join(dataDir, "data.json")
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			fmt.Println("json not exist")
+			return false, filePath, nil
+		} else if err != nil {
 			return false, filePath, err
 		} else {
+			fmt.Println("json exist")
 			return true, filePath, nil
 		}
 	}
@@ -228,6 +457,15 @@ func isDataJsonExist(a *fyne.App, w *fyne.Window) (bool, string, error) {
 func deleteJson(jsonPath string) error {
 	err := os.Remove(jsonPath)
 	return err
+}
+
+func decodeJsonData2(fi *os.File, data *DaAr) error {
+	dec := json.NewDecoder(fi)
+	if err := dec.Decode(&data); err != nil {
+		return err
+	} else {
+		return nil
+	}
 }
 
 func decodeJsonData(fi *os.File, data *DaAr, w *fyne.Window) error {
@@ -245,9 +483,30 @@ func decodeJsonData(fi *os.File, data *DaAr, w *fyne.Window) error {
 	}
 }
 
-func openData(w *fyne.Window, jsonPath string, data *DaAr) error {
+// Открывает data.json по пути и декодирует в структуру
+// возвращает ошибку
+func openData2(jsonPath string, data *DaAr) error {
 	fi, err := os.Open(jsonPath)
 	if err != nil {
+		return errors.New("Open json occured error")
+	}
+	defer fi.Close()
+	err = decodeJsonData2(fi, data)
+	if err != nil {
+		err = errors.New("err decoding json open")
+		if deleteJson(jsonPath) != nil {
+			return errors.New("Error delete json")
+		}
+	}
+	return err
+}
+
+func openData(w *fyne.Window, jsonPath string, data *DaAr) error {
+	fi, err := os.Open(jsonPath)
+	fmt.Println("jsonPath:", jsonPath)
+	fmt.Println("json open")
+	if err != nil {
+		fmt.Println("err json open")
 		info := dialog.NewInformation("Error while open json", fmt.Sprintf("Open json occured: %v", err), *w)
 		info.Show()
 		go func() {
@@ -259,6 +518,7 @@ func openData(w *fyne.Window, jsonPath string, data *DaAr) error {
 	defer fi.Close()
 	err = decodeJsonData(fi, data, w)
 	if err != nil {
+		fmt.Println("err decoding json open")
 		if deleteJson(jsonPath) != nil {
 			info := dialog.NewInformation("Error delete json", fmt.Sprintf("Delete json occured: %v", err), *w)
 			info.Show()
@@ -273,26 +533,81 @@ func openData(w *fyne.Window, jsonPath string, data *DaAr) error {
 }
 
 func createClassNum(numb string) string {
-	if len(numb) > 10 {
+	if len(numb) > 14 {
 		return "no class number"
 	}
 	return numb
 }
 
+func normalizeTime(t string) string {
+	smh := strings.Split(t, ":")
+	if len(smh[1]) < 2 {
+		buff := strings.Split(t, ":")
+		buff[1] += "0"
+		return strings.Join(buff, ":")
+	}
+	return t
+}
+
+func isAfter(first, sec *Da) bool {
+	numF, _ := strconv.Atoi(strings.Split(first.Time, " ")[0])
+	numS, _ := strconv.Atoi(strings.Split(sec.Time, " ")[0])
+	return numF > numS
+}
+
+func normalizeRasp(dA []*Da) {
+	c := 0
+	n := len(dA)
+	swapped := true
+	for swapped {
+		swapped = false
+		for i := 1; i < n; i++ {
+			c++
+			if isAfter(dA[i-1], dA[i]) {
+				// Обмен значений
+				dA[i-1], dA[i] = dA[i], dA[i-1]
+				swapped = true
+			}
+		}
+	}
+	fmt.Println("c:", c)
+}
+
+func normalizeParName(s string) string {
+	newS := strings.Split(s, " ")
+	str := ""
+	numb := 3
+	for len(newS) > numb {
+		buff := append(append(append([]string(nil), newS[0:numb]...), "\n"), newS[numb:]...)
+		str += strings.Join(buff[0:numb+1], " ")
+		newS = newS[numb:]
+	}
+	return str
+}
+
 func createListOfPars(w *fyne.Window, value string, data *DaAr, li *fyne.Container) *fyne.Container {
-	Day, DayNumber := getDa(*w, value)
+	Day, DayNumber := getDa(w, value)
 	dA := data.getRasp(Day+1, DayNumber)
+	normalizeRasp(dA)
 	for _, it := range dA {
-		card := widget.NewCard(it.Ti.Time, it.Rm.Name, container.NewVBox(
-			widget.NewLabel(it.Cl.Name),
+		//classNum - номер класса, Time - номер пары, Name - название пары,
+		//Teacher - Имя препода, getStart()/getEnd() - время начала/конца пары
+		card := widget.NewCard(it.Ti.Time, createClassNum(it.Rm.Name), container.NewVBox(
+			widget.NewLabel(normalizeParName(it.Cl.Name)),
 			widget.NewLabel(it.Cl.Teacher),
-			widget.NewLabel(it.getStart()),
-			widget.NewLabel(it.getEnd()),
+			widget.NewLabel(normalizeTime(it.getStart())),
+			widget.NewLabel(normalizeTime(it.getEnd())),
 		))
 		line := canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113})
 		li.Add(container.NewVBox(card, line))
 	}
 	return li
+}
+
+// сбрасывает текстовое поле, предполагается использовать VT.version
+// в качестве base
+func resetText(ok *widget.Label, base string) {
+	ok.SetText(base)
 }
 
 // Парралельное использование
@@ -334,12 +649,13 @@ func setParsing(ok *widget.Label, c <-chan struct{}) {
 
 func parsingData(ch chan<- struct{}, bArr []byte, data *DaAr) error {
 	if err := json.Unmarshal(bArr, &data); err != nil {
-		return fmt.Errorf("Ошибка при распарсивании JSON:%v", err)
+		return fmt.Errorf("ошибка при распарсивании JSON:%v", err)
 	}
 	ch <- struct{}{}
 	return nil
 }
 
+// создаётся data.json и в него записывается расписание
 func createAndSaveData(bArr []byte, jsonPath string) error {
 	file, err := os.Create(jsonPath)
 	if err != nil {
@@ -353,13 +669,50 @@ func createAndSaveData(bArr []byte, jsonPath string) error {
 	return nil
 }
 
-func initData(a *fyne.App, w *fyne.Window, content *fyne.Container, textState *widget.Label, data *DaAr, value string, li *fyne.Container) {
+// заполняет виртуальное дерево и структуру содержащую расписание
+// устанавливает textState
+func initializeData(VT *VirtualTree, data *DaAr, textState *widget.Label) error {
+	defer resetText(textState, VT.version)
+	var globalError error
+	if ext, jsonPath, globalError := isDataJsonExist2(VT.App); globalError != nil {
+		return globalError
+	} else if ext {
+		//если существует то заполняется структура расписанием
+		if openData2(jsonPath, data) == nil {
+			return nil
+		} else {
+			return errors.New("Cannot open Data.json")
+		}
+	} else {
+		//если нет то запрашиваем json с miet/schedule
+		ch := make(chan struct{})
+		go setLoading(textState, ch)
+		bArr, globalError := getJson(ch)
+		if globalError != nil {
+			return globalError
+		} else {
+			go setParsing(textState, ch)
+			globalError = parsingData(ch, bArr, data)
+			if globalError != nil {
+				return globalError
+			} else if globalError = createAndSaveData(bArr, jsonPath); globalError != nil {
+				return globalError
+			}
+		}
+	}
+	return globalError
+}
+
+func initData(a *fyne.App, w *fyne.Window, content *fyne.Container, textState *widget.Label, data *DaAr, value string, li *fyne.Container) error {
+	var globalError error
 	if ext, jsonPath, err := isDataJsonExist(a, w); err != nil {
 		info := dialog.NewInformation("Error data.json", "error while get data.json", *w)
 		go func() {
 			<-time.After(1 * time.Second)
 			info.Hide()
 		}()
+		globalError = err
+		return globalError
 	} else if ext {
 		if openData(w, jsonPath, data) == nil {
 			li = createListOfPars(w, value, data, li)
@@ -376,21 +729,92 @@ func initData(a *fyne.App, w *fyne.Window, content *fyne.Container, textState *w
 				<-time.After(1 * time.Second)
 				info.Hide()
 			}()
+			globalError = err
+			return globalError
 		} else {
 			go setParsing(textState, ch)
-			parsingData(ch, bArr, data)
-			if createAndSaveData(bArr, jsonPath) != nil {
+			err = parsingData(ch, bArr, data)
+			if err != nil {
+				info := dialog.NewInformation("Error parsing data", err.Error(), *w)
+				go func() {
+					<-time.After(1 * time.Second)
+					info.Hide()
+				}()
+				globalError = err
+				return globalError
+			} else if createAndSaveData(bArr, jsonPath) != nil {
 				info := dialog.NewInformation("Error while save and write to json", err.Error(), *w)
 				go func() {
 					<-time.After(1 * time.Second)
 					info.Hide()
 				}()
+				globalError = err
+				return globalError
 			} else {
 				initData(a, w, content, textState, data, value, li)
 			}
 		}
-		//TODO: не существует json -> запросить net  и создать
 	}
+	return globalError
+}
+
+func createWeekdayButton(w *fyne.Window) {
+	weekBtns := container.NewVBox()
+	week := []WeekD{
+		Monday, Tuesday,
+		Wednesday, Thursday,
+		Friday, Saturday,
+	}
+	for _, s := range week {
+		weekBtns.Add(widget.NewButton(s.String(), func() {
+			////TODO: сделать расписание по определённому дню через дату и название дня
+			getDa(w, s.String())
+		}))
+	}
+}
+
+type VirtualTree struct {
+	App     *fyne.App
+	Head    *fyne.Container
+	Body    *fyne.Container
+	version string
+}
+
+type Settings struct {
+	Version string
+	Group   string
+	IsLast  bool
+}
+
+func (s Settings) VersionString() string {
+	if s.Version == "error" {
+		return "error version"
+	} else if s.Version != "" {
+		if s.IsLast {
+			return s.Version + "\nlast version"
+		}
+		return s.Version + "\nneed update"
+	}
+	return "no info"
+}
+
+// Версия которая вызывает функцию больше чем в параметре
+func (s Settings) isVersionGreater(anS Settings) bool {
+	anotherSettingsVerison := strings.Split(anS.Version, ".")
+	for i, baseVersion := range strings.Split(s.Version, ".") {
+		num1, err := strconv.Atoi(anotherSettingsVerison[i])
+		if err != nil {
+			return false
+		}
+		num2, err := strconv.Atoi(baseVersion)
+		if err != nil {
+			return false
+		}
+		if num1 > num2 {
+			return false
+		}
+	}
+	return true
 }
 
 func try() {
@@ -398,268 +822,230 @@ func try() {
 	a := app.NewWithID("com.raspisanie.app")
 	a.Settings().SetTheme(theme.DarkTheme())
 	w := a.NewWindow("internet")
-	li := container.NewVBox()
-	w.Resize(fyne.Size{Width: 500})
+	//li := container.NewVBox()
+	w.Resize(fyne.Size{Width: 500, Height: 500})
 	var content *fyne.Container
 	var menu *fyne.Container
-	currValue := "Сегодня"
+	var VT VirtualTree
+	//TODO: виртуальное дерево для рендеринга
+	//currValue := "Сегодня"
 	ok := widget.NewLabel("none data")
-	menu = container.NewHBox(
+	VT.App = &a
+	VT.Head = container.NewHBox(
 		ok,
+		canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113}),
 		widget.NewRadioGroup([]string{"Сегодня", "Завтра"}, func(value string) {
-			if currValue != value {
-				fmt.Println("currValue:", currValue)
-				fmt.Println("value:", value)
-				currValue = value
-				li.RemoveAll()
-				content.Remove(li)
-				initData(&a, &w, content, ok, &data, value, li)
-			}
+			//TODO: переделать
+			fmt.Println(value)
+			content.RemoveAll()
+			VT.Body = fillBody(&data, idenDate(value))
+			content.Add(VT.Body)
+			w.Content().Refresh()
 		}),
+		canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113}),
+		//TODO: here
+		//widget.NewButton()
 	)
-	content = container.NewVBox(
-		menu,
-	)
-	initData(&a, &w, content, ok, &data, "Сегодня", li)
-	scr := container.NewVScroll(content)
-	w.SetContent(scr)
-	w.ShowAndRun()
-}
-
-func netTest() {
-	var data DaAr
-	a := app.NewWithID("com.raspisanie.app")
-	a.Settings().SetTheme(theme.DarkTheme())
-	w := a.NewWindow("internet")
-	w.Resize(fyne.Size{Width: 600})
-	var content *fyne.Container
-	ok := widget.NewLabel("none data")
-	Day, DayNumber := getDa(w, "Сегодня")
-	getData := widget.NewButton("Get Data", func() {
-		loading := []string{"Получение данных\\...", "Получение данных.|..", "Получение данных../."}
-		parsing := []string{"Парсинг\\...", "Парсинг.|..", "Парсинг../."}
-
-		ch := make(chan struct{})
-
-		dataDir := a.Storage().RootURI().Path()
-		if dataDir == "" {
-			dialog.ShowError(fmt.Errorf("error path"), w)
-		}
-		filePath := filepath.Join(dataDir, "data.json")
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			info := dialog.NewInformation("No data.json", "Trying to create", w)
-			info.Show()
-			go func() {
-				<-time.After(1 * time.Second)
-				info.Hide()
-			}()
-			go func(c <-chan struct{}) {
-				var num s
-				for {
-					select {
-					case <-c:
-						num.reset()
-						ok.SetText("Данные получены")
-						return
-					default:
-						ok.SetText(loading[num])
-						num.next()
-
-						time.Sleep(1 * time.Millisecond * 150)
-					}
-				}
-			}(ch)
-
-			bArr, _ := getJson(ch)
-			go func(c <-chan struct{}) {
-				var num s
-				for {
-					select {
-					case <-c:
-						ok.SetText("Данные распаршены")
-						return
-					default:
-						ok.SetText(parsing[num])
-						(&num).next()
-
-						time.Sleep(1 * time.Millisecond * 150)
-					}
-				}
-			}(ch)
-
-			//// Распарсиваем JSON-данные
-			if err := json.Unmarshal(bArr, &data); err != nil {
-				fmt.Println("Ошибка при распарсивании JSON:", err)
-			}
-			ch <- struct{}{}
-			fmt.Println(filePath)
-			file, err := os.Create(filePath)
-			if err != nil {
-				dialog.ShowError(err, w)
-			}
-			defer file.Close()
-			_, err = file.Write(bArr)
-			if err != nil {
-				dialog.ShowError(err, w)
-				return
-			}
-			ok.SetText("Data saved")
-		} else if err != nil {
-			dialog.ShowError(err, w)
-		} else {
-			fi, err := os.Open(filePath)
-			if err != nil {
-				dialog.ShowError(err, w)
-			}
-			defer fi.Close()
-			dec := json.NewDecoder(fi)
-			if err := dec.Decode(&data); err != nil {
-				dialog.ShowError(err, w)
-			} else {
-				dialog.ShowInformation("data", data.Semestr, w)
-				//var bA []string
-				//for _, st := range data.getRasp(Day+1, DayNumber) {
-				//bA = append(bA, st.String())
-				//}
-				//hmm := container.NewVBox(
-				//	widget.NewLabel("Predmet"),
-				//	widget.NewLabel("Prepod"),
-				//	widget.NewLabel("Start"),
-				//	widget.NewLabel("End"),
-				//)
-				dA := data.getRasp(Day+1, DayNumber)
-				li := container.NewVBox()
-				for _, it := range dA {
-					card := widget.NewCard(it.Ti.Time, it.Rm.Name, container.NewVBox(
-						widget.NewLabel(it.Cl.Name),
-						widget.NewLabel(it.Cl.Teacher),
-						widget.NewLabel(it.getStart()),
-						widget.NewLabel(it.getEnd()),
-					))
-					line := canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113})
-					li.Add(container.NewVBox(card, line))
-				}
-				content.Add(li)
-				w.Content().Refresh()
-				//fmt.Println("here: ", data.getRasp(Day+1, DayNumber))
-				//fmt.Println(fmt.Sprintf("current date: %v\n%v", strings.Join(bA, "")))
-				//ok.SetText(strings.Join(bA, ""))
-			}
-		}
-
-		//ok.SetText(data.Semestr)
-		//ok.SetText("data ok")
-	})
-	content = container.NewVBox(
-		container.NewHBox(
-			ok,
-			widget.NewRadioGroup([]string{"Сегодня", "Завтра"}, func(value string) {
-				Day, DayNumber = getDa(w, value)
-				getData.OnTapped()
-			}),
-		),
-		getData,
-	)
-	scr := container.NewVScroll(content)
-	w.SetContent(scr)
-	w.ShowAndRun()
-}
-
-func osnova() {
-	t := Ti{
-		Time:     "1 пара",
-		Code:     1,
-		TimeFrom: "0001-01-01T09:00:00",
-		TimeTo:   "0001-01-01T10:20:00",
+	settings, err := getSettings2(VT.App)
+	if err != nil {
+		fmt.Println(err.Error())
+		VT.version = "error"
+		resetText(ok, VT.version)
+	} else {
+		VT.version = settings.Version
 	}
-	a := app.NewWithID("raspisanie.preferences")
-	w := a.NewWindow("clock")
-	clock := widget.NewLabel("")
-	updateTime(clock)
-	ok := widget.NewLabel("unknown")
-	saveJs := widget.NewButton("Save Json", func() {
-
-		// Получаем директорию внутреннего хранилища приложения
-		if a.Preferences().StringWithFallback("dataDir", a.Preferences().String("fyne_storage")) == "" {
-			var ChJs fyne.URI
-			ChJs, err := storage.Child(a.Storage().RootURI(), "data.json")
-			if err != nil {
-				write, _ := storage.Writer(ChJs)
-				dJs, _ := json.Marshal(t)
-				write.Write(dJs)
-				defer write.Close()
-				ok.SetText("CreateJson")
-			}
-			closer, err := storage.Reader(ChJs)
-			ok := widget.NewLabel("here")
-			if err != nil {
-				ok.SetText("error reader")
+	errs := initializeData(&VT, &data, ok)
+	if errs != nil {
+		w.SetContent(
+			widget.NewLabel("errors occured: " + errs.Error()),
+		)
+	} else {
+		VT.Body = fillBody(&data, idenDate(""))
+		menu = container.NewVBox(
+			VT.Head,
+			canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113}),
+		)
+		content = VT.Body
+		scr := container.NewVScroll(container.NewVBox(menu, content))
+		w.SetContent(scr)
+	}
+	isUp, upV := checkUpdate()
+	if (!isUp && upV == nil) || VT.version == "error" {
+		resetText(ok, "error version")
+	} else {
+		if upV != nil && settings != nil {
+			if upV.isVersionGreater(*settings) {
+				settings.IsLast = false
 			} else {
-				var t Ti
-				c := []byte{}
-				closer.Read(c)
-				json.Unmarshal(c, &t)
-				//ok.SetText(t.String())
-				ok.SetText("Json exists")
-				//ok.SetText(ChJs.Path())
+				settings.IsLast = true
 			}
-			//defer closer.Close()
-		} else {
-			ok.SetText("No dir")
 		}
-	})
-	content := container.NewVBox(
-		clock,
-		ok,
-		saveJs,
-	)
-	//settings := app.SettingsSchema{
-	//	Theme: theme.DarkTheme(),
-	//}
-	a.Settings().SetTheme(theme.DarkTheme())
-	//background := canvas.NewRectangle(color.RGBA{R: 24, G: 65, B: 196, A: 148})
-	//background.Resize(content.MinSize())
-	//contentWithBackground := container.New(layout.NewBorderLayout(nil, nil, nil, nil), background, content)
-	w.SetContent(content)
-	go func() {
-		for range time.Tick(time.Second) {
-			updateTime(clock)
-		}
-	}()
+	}
+	if settings != nil && settings.IsLast {
+		resetText(ok, VT.version+"\nlast version")
+	} else {
+		resetText(ok, VT.version+"\nneed update")
+	}
+	VT.Head.Add(container.NewGridWithColumns(3, createArrButtonRaspByDay(&data, content, &VT, &w)...))
 	w.ShowAndRun()
+}
+
+func createArrButtonRaspByDay(data *DaAr, content *fyne.Container, VT *VirtualTree, w *fyne.Window) (slice []fyne.CanvasObject) {
+	weekDs := ArrayWeekD()
+	for i, dayName := range ArrayWeekDString("ru") {
+		buffI := i
+		buffDay := dayName
+		slice = append(slice, widget.NewButton(buffDay, func() {
+			fmt.Println(buffDay)
+			content.RemoveAll()
+			VT.Body = fillBody(data, weekDs[buffI])
+			content.Add(VT.Body)
+			(*w).Content().Refresh()
+		}))
+	}
+	return
+}
+
+// Есть ли апдейт и его версию
+func checkUpdate() (bool, *Settings) {
+	url := "https://github.com/zongrade/raspisanie/tags"
+	responce, err := http.Get(url)
+	if err != nil {
+		return false, nil
+	}
+	defer responce.Body.Close()
+	body, err := io.ReadAll(responce.Body)
+	if err != nil {
+		return false, nil
+	}
+	re := regexp.MustCompile(`class="Link--primary Link">([^<]+)</a>`)
+	anRe := regexp.MustCompile(`(\d+\.\d+\.\d+)`)
+	matches := re.FindAllStringSubmatch(string(body), -1)
+	type version struct {
+		max uint64
+		med uint64
+		min uint64
+	}
+	max := version{}
+	for _, st := range matches {
+		bufAr := strings.Split(anRe.FindString(st[0]), ".")
+		b := []uint64{}
+		for _, st := range bufAr {
+			ui, err := strconv.ParseUint(st, 10, 8)
+			if err != nil {
+				b = append(b, 0)
+			} else {
+				b = append(b, ui)
+			}
+		}
+		if len(bufAr) == 3 {
+			if max.max <= b[0] {
+				max.max = b[0]
+			}
+			if max.med <= b[1] {
+				max.med = b[1]
+			}
+			if max.min <= b[2] {
+				max.min = b[2]
+			}
+		}
+	}
+	return true, &Settings{Version: fmt.Sprintf("%d.%d.%d", max.max, max.med, max.min)}
+}
+
+func tryLoadSettings() (*Settings, error) {
+	bySettings := resourceSettingsJson.StaticContent
+	settings := &Settings{}
+	if err := json.Unmarshal(bySettings, &settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+// получение файла settings.json, он должен включаться в билд
+func getSettings(a *fyne.App) (*Settings, error) {
+	res, err := fyne.LoadResourceFromPath("testdata/settings.json")
+	if err != nil {
+		return nil, err
+	}
+	settings := &Settings{}
+	if err := json.Unmarshal(res.Content(), settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func getSettings2(a *fyne.App) (*Settings, error) {
+	settings, err := tryLoadSettings()
+	if err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func fillBody(data *DaAr, wk WeekD) *fyne.Container {
+	day, dayNumber := identificateDate(wk)
+	dA := data.getRasp(day+1, dayNumber)
+	normalizeRasp(dA)
+	var bufB []fyne.CanvasObject
+	//VT.Body = container.NewVBox()
+	for _, it := range dA {
+		card := widget.NewCard(it.Ti.Time, createClassNum(it.Rm.Name), container.NewVBox(
+			widget.NewLabel(normalizeParName(it.Cl.Name)),
+			widget.NewLabel(it.Cl.Teacher),
+			widget.NewLabel(normalizeTime(it.getStart())),
+			widget.NewLabel(normalizeTime(it.getEnd())),
+		))
+		line := canvas.NewLine(color.NRGBA{R: 24, G: 65, B: 196, A: 113})
+		bufB = append(bufB, container.NewVBox(card, line))
+		//VT.Body.Add(container.NewVBox(card, line))
+	}
+	return container.NewVBox(bufB...)
+}
+
+// после этой функции вызвать identificateDate
+func idenDate(dt string) WeekD {
+	switch dt {
+	case "Сегодня":
+		return toWeekD(time.Now().Weekday())
+	case "Завтра":
+		return toWeekD(time.Now().Add(time.Hour * 24).Weekday())
+	default:
+		return toWeekD(time.Now().Weekday())
+	}
+}
+
+// Определяет дату
+// TODO: доделать, совместить дни недели и сегодня/завтра
+func identificateDate(dat WeekD) (day, dayNumber uint8) {
+	specificDate := time.Date(2023, time.October, 23, 1, 0, 0, 0, time.UTC)
+	currentData := time.Now()
+	currDay := toWeekD(currentData.Weekday())
+	tt := time.Duration(currDay.diffBetwenDays(dat))
+	newDate := currentData.Add(tt * 24 * time.Hour)
+	//TODO: day это день недели, dayNumber 1/2 числитель/знаменатель
+	//dayNumber вычисляется относительно 23 октября
+	fmt.Println(newDate)
+	day = uint8(toWeekD(newDate.Weekday()))
+	dayNumber = uint8(math.Floor(math.Abs(specificDate.Sub(newDate).Hours())/24/7)) % 4
+	return
 }
 
 func getJson(ch chan<- struct{}) ([]byte, error) {
+
+	fmt.Println("here get json")
 	client := &http.Client{}
 
-	cookies := []*http.Cookie{
-		{Name: "_ym_uid", Value: "164440448297613284"},
-		{Name: "BITRIX_SM_UIDL", Value: "lmuff%40mail.ru"},
-		{Name: "BITRIX_SM_SALE_UID", Value: "0"},
-		{Name: "BITRIX_SM_LOGIN", Value: "lmuff%40mail.ru"},
-		{Name: "__utma", Value: "236244190.1120334790.1644404482.1646161857.1646490205.6"},
-		{Name: "top100_id", Value: "t1.-1.461407572.1655304532011"},
-		{Name: "adtech_uid", Value: "40c4f10a-3ede-4682-ac97-f455f1bf7654%3Amiet.ru"},
-		{Name: "t3_sid_NaN", Value: "s1.1090775154.1667383698943.1667384961953.3.3"},
-		{Name: "BITRIX_SM_user_group_referrer", Value: "YTowOnt9"},
-		{Name: "BX_USER_ID", Value: "df1586cd776de69c436b6613d96d2f79"},
-		{Name: "BITRIX_SM_user_group_links", Value: "YToxOntpOjIxO2k6MTt9"},
-		{Name: "_ym_d", Value: "1693490168"},
-		{Name: "_ym_isad", Value: "1"},
-		{Name: "wl", Value: "8149fe91664ed3fbcca4f0758882cb42"},
-		{Name: "SL_G_WPT_TO", Value: "ru"},
-		{Name: "SL_GWPT_Show_Hide_tmp", Value: "1"},
-		{Name: "SL_wptGlobTipTmp", Value: "1"},
-		{Name: "MIET_PHPSESSID", Value: "kCtzZOH1WmMtWouwYXjPz33sub0lG8xk"},
-		{Name: "last_visit", Value: "1698205812607%3A%3A1698216612607"},
-		{Name: "t3_sid_512157", Value: "s1.1952763010.1698216587168.1698216612613.209.3"},
+	cookies := getCookie()
+	if len(cookies) < 1 {
+		return nil, fmt.Errorf("ошибка при получении кук")
 	}
 
 	url := "https://miet.ru/schedule/data?group=%D0%9F-21%D0%9C"
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("Ошибка при создании запроса:%v", err)
+		return nil, fmt.Errorf("ошибка при создании запроса:%v", err)
 	}
 
 	for _, cookie := range cookies {
@@ -668,25 +1054,58 @@ func getJson(ch chan<- struct{}) ([]byte, error) {
 
 	response, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Ошибка при выполнении запроса:%v", err)
+		return nil, fmt.Errorf("ошибка при выполнении запроса:%v", err)
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, fmt.Errorf("Ошибка при чтении ответа:%v", err)
+		return nil, fmt.Errorf("ошибка при чтении ответа:%v", err)
 	}
 	ch <- struct{}{}
 	return body, nil
 }
 
-func check(e error) {
-	if e != nil {
-		panic(e)
+// получение валидных кук
+func getCookie() []*http.Cookie {
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Jar: jar,
 	}
-}
+	cookie := []*http.Cookie{}
+	getUrl := "https://miet.ru/schedule/"
 
-func saveJson(d []byte) {
-	err := os.WriteFile("./data.json", d, 0666)
-	check(err)
+	re, err := http.Get(getUrl)
+	if err != nil {
+		return nil
+	}
+	defer re.Body.Close()
+	bodyBytes, err := io.ReadAll(re.Body)
+	if err != nil {
+		fmt.Println("Ошибка при чтении тела ответа:", err)
+		return nil
+	}
+	reg := regexp.MustCompile(`document.cookie="wl=([^;]+);`)
+	matches := reg.FindAllStringSubmatch(string(bodyBytes), -1)
+	if len(matches) > 0 {
+		cookie = append(cookie, &http.Cookie{Name: "wl", Value: matches[0][1]})
+	}
+	fmt.Println("cookie first:", cookie)
+
+	cookieUrl, _ := url.Parse(getUrl)
+
+	jar.SetCookies(cookieUrl, cookie)
+
+	resp, err := client.Get("https://miet.ru/schedule/")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	cookies := client.Jar.Cookies(resp.Request.URL)
+	return cookies
 }
